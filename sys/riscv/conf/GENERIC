@@ -194,7 +194,9 @@ device		gif		# IPv6 and IPv4 tunneling
 device		firmware	# firmware assist module
 
 # MMC/SD/SDIO Card slot support
+device		spacemit_ccu	# SpacemiT K1 clock/reset controller
 device		sdhci
+device		sdhci_spacemit	# SpacemiT K1 SDHCI controller
 device		mmc			# MMC/SD bus
 device		mmcsd			# MMC/SD flash cards
 
