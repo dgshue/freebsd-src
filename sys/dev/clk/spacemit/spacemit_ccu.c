@@ -44,6 +44,7 @@
 #include <sys/systm.h>
 #include <sys/bus.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/module.h>
 #include <sys/mutex.h>
 #include <sys/resource.h>
@@ -56,9 +57,11 @@
 #include <dev/ofw/ofw_bus_subr.h>
 
 #include <dev/clk/clk.h>
+#include <dev/syscon/syscon.h>
 
 #include "clkdev_if.h"
 #include "hwreset_if.h"
+#include "syscon_if.h"
 
 /* Fixed parent rates (PLL1 VCO = 2457.6 MHz, dividers per mainline names). */
 #define	K1_PLL1_D3	819200000UL	/* pll1_d3_819p2 */
@@ -229,6 +232,7 @@ struct smccu_softc {
 	struct resource		*mem_res;
 	struct clkdom		*clkdom;
 	const struct smccu_bank	*bank;
+	struct syscon		*syscon;
 };
 
 struct smccu_clknode_sc {
@@ -386,6 +390,58 @@ smccu_reset_is_asserted(device_t dev, intptr_t id, bool *reset)
 }
 
 /*
+ * Syscon interface: expose the bank registers to consumers such as the
+ * EMAC driver, which programs RGMII delays through the APMU bank
+ * (devicetree property "spacemit,apmu" = <phandle offset>).
+ */
+static uint32_t
+smccu_syscon_read_4(struct syscon *syscon, bus_size_t offset)
+{
+	struct smccu_softc *sc;
+
+	sc = device_get_softc(syscon->pdev);
+	mtx_assert(&sc->mtx, MA_OWNED);
+	return (READ4(sc, offset));
+}
+
+static int
+smccu_syscon_write_4(struct syscon *syscon, bus_size_t offset, uint32_t val)
+{
+	struct smccu_softc *sc;
+
+	sc = device_get_softc(syscon->pdev);
+	mtx_assert(&sc->mtx, MA_OWNED);
+	WRITE4(sc, offset, val);
+	return (0);
+}
+
+static int
+smccu_syscon_modify_4(struct syscon *syscon, bus_size_t offset,
+    uint32_t clear_bits, uint32_t set_bits)
+{
+	struct smccu_softc *sc;
+	uint32_t val;
+
+	sc = device_get_softc(syscon->pdev);
+	mtx_assert(&sc->mtx, MA_OWNED);
+	val = READ4(sc, offset);
+	val &= ~clear_bits;
+	val |= set_bits;
+	WRITE4(sc, offset, val);
+	return (0);
+}
+
+static syscon_method_t smccu_syscon_methods[] = {
+	SYSCONMETHOD(syscon_unlocked_read_4,	smccu_syscon_read_4),
+	SYSCONMETHOD(syscon_unlocked_write_4,	smccu_syscon_write_4),
+	SYSCONMETHOD(syscon_unlocked_modify_4,	smccu_syscon_modify_4),
+
+	SYSCONMETHOD_END
+};
+DEFINE_CLASS_1(smccu_syscon, smccu_syscon_class, smccu_syscon_methods, 0,
+    syscon_class);
+
+/*
  * Device methods.
  */
 static int
@@ -458,6 +514,11 @@ smccu_attach(device_t dev)
 
 	hwreset_register_ofw_provider(dev);
 
+	sc->syscon = syscon_create_ofw_node(dev, &smccu_syscon_class,
+	    ofw_bus_get_node(dev));
+	if (sc->syscon == NULL)
+		device_printf(dev, "cannot register syscon provider\n");
+
 	return (0);
 }
 
@@ -495,6 +556,10 @@ static device_method_t smccu_methods[] = {
 	/* clkdev interface */
 	DEVMETHOD(clkdev_device_lock,	smccu_device_lock),
 	DEVMETHOD(clkdev_device_unlock,	smccu_device_unlock),
+
+	/* syscon device locking (shares the bank mutex) */
+	DEVMETHOD(syscon_device_lock,	smccu_device_lock),
+	DEVMETHOD(syscon_device_unlock,	smccu_device_unlock),
 
 	/* Reset interface */
 	DEVMETHOD(hwreset_assert,	smccu_reset_assert),
