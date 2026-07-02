@@ -65,6 +65,7 @@
 #include <dev/ofw/ofw_subr.h>
 
 #include <dev/clk/clk.h>
+#include <dev/hwreset/hwreset.h>
 #include <dev/phy/phy_usb.h>
 #endif
 
@@ -468,6 +469,21 @@ snps_dwc3_common_attach(device_t dev, bool is_fdt)
 			device_printf(dev, "Cannot enable bus_clk\n");
 	}
 
+	/*
+	 * SpacemiT K1: enable the single "usbdrd30" clock and deassert the
+	 * ahb/vcc/phy resets so the XHCI core can be reset and started.
+	 */
+	if (ofw_bus_is_compatible(dev, "spacemit,k1-dwc3") == 1) {
+		clk_t clk;
+		hwreset_t rst;
+		int i;
+
+		if (clk_get_by_ofw_index(dev, node, 0, &clk) == 0)
+			clk_enable(clk);
+		for (i = 0; hwreset_get_by_ofw_idx(dev, node, i, &rst) == 0; i++)
+			hwreset_deassert(rst);
+	}
+
 	/* Get the phys */
 	usb2_phy = usb3_phy = NULL;
 	error = phy_get_by_ofw_name(dev, node, "usb2-phy", &usb2_phy);
@@ -522,6 +538,7 @@ skip_phys:
 #ifdef FDT
 static struct ofw_compat_data compat_data[] = {
 	{ "snps,dwc3",	1 },
+	{ "spacemit,k1-dwc3",	1 },
 	{ NULL,		0 }
 };
 

@@ -11,3 +11,7 @@ device		spacemit_reset
 device		gpio
 device		spacemit_gpio
 device		spacemit_pinctrl
+device		dwc3
+device		spacemit_usb2phy
+device		spacemit_combphy
+device		spacemit_tsensor

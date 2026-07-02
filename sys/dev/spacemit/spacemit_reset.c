@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Copyright (c) 2026 Derek Shue <dgshue@gmail.com>
+ * Copyright (c) 2026 Daniel Shue <dgshue@gmail.com>
  *
  * SpacemiT K1 (Ky X1) system reset via the vendor watchdog.
  *
@@ -23,6 +23,7 @@
 #include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/reboot.h>
+#include <sys/watchdog.h>
 
 #include <machine/bus.h>
 #include <vm/vm.h>
@@ -87,6 +88,46 @@ k1_reset_final(void *arg __unused, int howto)
 		cpu_spinwait();
 }
 
+/*
+ * watchdog(9) provider: watchdogd(8) calls this periodically with the
+ * requested timeout; each call re-arms the WDT (WCR restarts the counter),
+ * so a hung system stops petting it and the WDT resets the SoC.  This also
+ * covers hangs the shutdown_final handler cannot (it never runs on a hang).
+ */
+static void
+k1_wd_event(void *arg __unused, u_int cmd, int *error)
+{
+	uint64_t ns;
+	uint32_t secs, ticks;
+
+	if (k1_wdt_va == NULL || k1_mpmu_va == NULL)
+		return;
+
+	cmd &= WD_INTERVAL;
+	if (cmd == 0) {
+		/* Disarm. */
+		wdt_wr(WDT_WMER, 0x0);
+		*error = 0;
+		return;
+	}
+
+	/* cmd is log2(nanoseconds); the WDT counts at ~256 Hz. */
+	ns = (uint64_t)1 << cmd;
+	secs = ns / 1000000000ULL;
+	if (secs == 0)
+		secs = 1;
+	if (secs > 255)
+		secs = 255;		/* 16-bit counter at 256 Hz */
+	ticks = secs << 8;
+
+	*(volatile uint32_t *)(k1_mpmu_va + MPMU_APRR) |= MPMU_APRR_WDTR;
+	wdt_wr(WDT_WMR, ticks);
+	wdt_wr(WDT_WMER, 0x3);
+	wdt_wr(WDT_WSR, 0x0);
+	wdt_wr(WDT_WCR, 0x1);		/* restart counter = pet */
+	*error = 0;
+}
+
 static void
 k1_reset_init(void *arg __unused)
 {
@@ -105,5 +146,8 @@ k1_reset_init(void *arg __unused)
 	 */
 	EVENTHANDLER_REGISTER(shutdown_final, k1_reset_final, NULL,
 	    SHUTDOWN_PRI_LAST);
+
+	/* Register as a watchdog(9) provider for watchdogd(8). */
+	EVENTHANDLER_REGISTER(watchdog_list, k1_wd_event, NULL, 0);
 }
 SYSINIT(k1_reset, SI_SUB_CONFIGURE, SI_ORDER_ANY, k1_reset_init, NULL);

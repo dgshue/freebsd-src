@@ -118,3 +118,7 @@ dev/smte/if_smte.c	optional	smte fdt
 dev/spacemit/spacemit_reset.c	optional	spacemit_reset
 dev/gpio/spacemit/spacemit_gpio.c	optional	spacemit_gpio fdt
 dev/pinctrl/spacemit/spacemit_pinctrl.c	optional	spacemit_pinctrl fdt
+dev/usb/controller/dwc3/dwc3.c	optional	xhci fdt dwc3
+dev/phy/spacemit/spacemit_usb2phy.c	optional	spacemit_usb2phy fdt
+dev/phy/spacemit/spacemit_combphy.c	optional	spacemit_combphy fdt
+dev/spacemit/spacemit_tsensor.c	optional	spacemit_tsensor fdt
