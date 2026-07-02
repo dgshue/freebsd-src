@@ -622,21 +622,25 @@ smte_intr(void *arg)
 
 	stat = RD4(sc, DMA_STATUS_IRQ);
 
-	if ((stat & (DMA_STATUS_IRQ_RX_DMA_STOPPED |
-	    DMA_STATUS_IRQ_RX_DES_UNAVAILABLE)) != 0 && sc->rx_dbg < 10) {
-		sc->rx_dbg++;
-		device_printf(sc->dev,
-		    "DBG rx stall: stat %#x cons %d desc0 %#x desc1 %#x "
-		    "addr %#x\n", stat, sc->rx_cons,
-		    sc->rxdesc[sc->rx_cons].sd_desc0,
-		    sc->rxdesc[sc->rx_cons].sd_desc1,
-		    sc->rxdesc[sc->rx_cons].sd_addr1);
+	/*
+	 * Ack (write-1-to-clear) the events we handle BEFORE draining the
+	 * rings.  smte_rxeof() drops the lock to call if_input(), and any
+	 * completion that arrives in that window then re-asserts its bit
+	 * after this ack and retriggers the interrupt, rather than being
+	 * cleared unprocessed (the old post-drain ack lost those, stranding
+	 * RX until the mitigation timeout fired).  Mask to handled bits only:
+	 * DMA_STATUS_IRQ has sticky state bits that are not write-1-to-clear.
+	 */
+	stat &= (DMA_STATUS_IRQ_RX_TRANSFER_DONE |
+	    DMA_STATUS_IRQ_RX_MISSED_FRAME | DMA_STATUS_IRQ_TX_TRANSFER_DONE);
+	if (stat == 0) {
+		SMTE_UNLOCK(sc);
+		return;
 	}
+	WR4(sc, DMA_STATUS_IRQ, stat);
 
 	if ((stat & (DMA_STATUS_IRQ_RX_TRANSFER_DONE |
-	    DMA_STATUS_IRQ_RX_MISSED_FRAME |
-	    DMA_STATUS_IRQ_RX_DMA_STOPPED |
-	    DMA_STATUS_IRQ_RX_DES_UNAVAILABLE)) != 0)
+	    DMA_STATUS_IRQ_RX_MISSED_FRAME)) != 0)
 		smte_rxeof(sc);
 
 	if ((stat & DMA_STATUS_IRQ_TX_TRANSFER_DONE) != 0) {
@@ -644,8 +648,6 @@ smte_intr(void *arg)
 		if (!if_sendq_empty(sc->ifp))
 			smte_start_locked(sc->ifp);
 	}
-
-	WR4(sc, DMA_STATUS_IRQ, stat);
 
 	SMTE_UNLOCK(sc);
 }
@@ -691,7 +693,12 @@ smte_init_locked(struct smte_softc *sc)
 	WR4(sc, MAC_TRANSMIT_JABBER_SIZE, ETHER_MAX_LEN_JUMBO);
 	WR4(sc, MAC_RECEIVE_JABBER_SIZE, ETHER_MAX_LEN_JUMBO);
 
-	/* Receive interrupt mitigation. */
+	/*
+	 * Receive interrupt mitigation (proven-good values).  RX throughput
+	 * tuning is deferred until remote reboot works and iteration is free;
+	 * writing 0 here wedges the controller, and the ack-ordering rework
+	 * needs on-hardware validation.
+	 */
 	WR4(sc, DMA_RECEIVE_IRQ_MITIGATION,
 	    (64 << DMA_RECEIVE_IRQ_MITIGATION_FRAME_COUNTER_SHIFT) |
 	    ((600 * 312) << DMA_RECEIVE_IRQ_MITIGATION_TIMEOUT_COUNTER_SHIFT) |

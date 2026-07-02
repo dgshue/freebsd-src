@@ -7,3 +7,4 @@ device		spacemit_ccu
 device		sdhci_spacemit
 device		smte
 device		miibus
+device		spacemit_reset
