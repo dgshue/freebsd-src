@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * Copyright (c) 2026 Derek Shue <dgshue@gmail.com>
+ * Copyright (c) 2026 Daniel Shue <dgshue@gmail.com>
  *
  * GPIO controller driver for the SpacemiT K1 (Ky X1) RISC-V SoC
  * (compatible: spacemit,k1-gpio).  Register semantics from the OpenBSD

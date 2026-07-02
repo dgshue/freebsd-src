@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause AND ISC
  *
- * Copyright (c) 2026 Derek Shue <dgshue@gmail.com>
+ * Copyright (c) 2026 Daniel Shue <dgshue@gmail.com>
  *
  * Portions derived from OpenBSD's if_smte.c:
  * Copyright (c) 2026 Mark Kettenis <kettenis@openbsd.org>
