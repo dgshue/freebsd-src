@@ -2911,12 +2911,24 @@ pmap_fault(pmap_t pmap, vm_offset_t va, vm_prot_t ftype)
 {
 	pd_entry_t *l2, l2e;
 	pt_entry_t bits, *pte, oldpte;
+	bool locked;
 	int rv;
 
 	KASSERT(VIRT_IS_VALID(va), ("pmap_fault: invalid va %#lx", va));
 
 	rv = 0;
-	PMAP_LOCK(pmap);
+	/*
+	 * On implementations without hardware A/D update (Svade), the MMU
+	 * raises a page fault when a valid mapping is accessed with PTE_A
+	 * (or written with PTE_D) clear.  For kernel mappings this can happen
+	 * from contexts that must not acquire a sleepable lock -- in
+	 * particular the scheduler idle thread touching per-CPU data.  The
+	 * kernel page tables are stable and pmap_store_bits() is atomic, so
+	 * service the A/D fault for kernel_pmap without taking the pmap lock.
+	 */
+	locked = (pmap != kernel_pmap);
+	if (locked)
+		PMAP_LOCK(pmap);
 	l2 = pmap_l2(pmap, va);
 	if (l2 == NULL || ((l2e = pmap_load(l2)) & PTE_V) == 0)
 		goto done;
@@ -2949,7 +2961,8 @@ pmap_fault(pmap_t pmap, vm_offset_t va, vm_prot_t ftype)
 	sfence_vma();
 	rv = 1;
 done:
-	PMAP_UNLOCK(pmap);
+	if (locked)
+		PMAP_UNLOCK(pmap);
 	return (rv);
 }
 
