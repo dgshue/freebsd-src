@@ -41,6 +41,7 @@
 #include <sys/module.h>
 #include <sys/mutex.h>
 #include <sys/rman.h>
+#include <sys/gpio.h>
 #include <sys/socket.h>
 #include <sys/sockio.h>
 
@@ -64,6 +65,7 @@
 #include <dev/clk/clk.h>
 #include <dev/hwreset/hwreset.h>
 #include <dev/syscon/syscon.h>
+#include <dev/gpio/gpiobusvar.h>
 
 #include "if_smtereg.h"
 
@@ -936,6 +938,53 @@ smte_hw_init(struct smte_softc *sc)
 }
 
 /*
+ * Some EMAC instances hold their PHY in reset via a GPIO on the mdio-bus
+ * child node (reset-gpios).  Pulse it per the reset-delay-us /
+ * reset-post-delay-us timings so MDIO can reach the PHY.  (smte0's PHY
+ * happens to work without this; smte1's does not.)
+ */
+static void
+smte_phy_reset(struct smte_softc *sc)
+{
+	gpio_pin_t reset;
+	phandle_t node, mdio;
+	uint32_t predelay, postdelay;
+	int error;
+
+	node = ofw_bus_get_node(sc->dev);
+	mdio = ofw_bus_find_child(node, "mdio-bus");
+	if (mdio <= 0)
+		return;
+	if (!OF_hasprop(mdio, "reset-gpios"))
+		return;
+
+	error = gpio_pin_get_by_ofw_property(sc->dev, mdio, "reset-gpios",
+	    &reset);
+	if (error != 0) {
+		if (bootverbose)
+			device_printf(sc->dev,
+			    "PHY reset-gpios lookup failed (%d)\n", error);
+		return;
+	}
+
+	predelay = 10000;
+	postdelay = 100000;
+	OF_getencprop(mdio, "reset-delay-us", &predelay, sizeof(predelay));
+	OF_getencprop(mdio, "reset-post-delay-us", &postdelay,
+	    sizeof(postdelay));
+
+	gpio_pin_setflags(reset, GPIO_PIN_OUTPUT);
+	gpio_pin_set_active(reset, true);	/* assert reset */
+	DELAY(predelay);
+	gpio_pin_set_active(reset, false);	/* release reset */
+	DELAY(postdelay);
+
+	gpio_pin_release(reset);
+	if (bootverbose)
+		device_printf(sc->dev, "pulsed PHY reset gpio\n");
+}
+
+/*
  * Probe / attach.
  */
 static int
@@ -1050,6 +1099,7 @@ smte_attach(device_t dev)
 		memcpy(lladdr, eaddr.octet, ETHER_ADDR_LEN);
 	}
 
+	smte_phy_reset(sc);
 	smte_hw_init(sc);
 
 	error = smte_setup_dma(sc);
@@ -1119,3 +1169,4 @@ DRIVER_MODULE(smte, simplebus, smte_driver, 0, 0);
 DRIVER_MODULE(miibus, smte, miibus_driver, 0, 0);
 MODULE_DEPEND(smte, ether, 1, 1, 1);
 MODULE_DEPEND(smte, miibus, 1, 1, 1);
+MODULE_DEPEND(smte, gpiobus, 1, 1, 1);
