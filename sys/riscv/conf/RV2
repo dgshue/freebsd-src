@@ -1,0 +1,7 @@
+include GENERIC
+ident		RV2
+options		EARLY_PRINTF=sbi
+nodevice	vt_efifb
+nodevice	uart_ns8250
+device		spacemit_ccu
+device		sdhci_spacemit
