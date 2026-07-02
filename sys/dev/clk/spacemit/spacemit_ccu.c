@@ -163,6 +163,7 @@ static const uint64_t k1_sdh2_rates[] = {
 #define	APMU_SDH2_CLK_RES_CTRL	0x0e0
 #define	APMU_EMAC0_CLK_RES_CTRL	0x3e4
 #define	APMU_EMAC1_CLK_RES_CTRL	0x3ec
+#define	APMU_PCIE_CLK_RES_CTRL_0 0x3cc	/* combo PHY 0 = USB3 / PCIe0 */
 
 static const struct smccu_clk k1_apmu_clks[] = {
 	/* id, name,          reg,                    gate, mux,w, div,w */
@@ -184,6 +185,13 @@ static const struct smccu_clk k1_apmu_clks[] = {
 	    NULL, 0, 0 },
 	{ 39, "k1_emac1_bus", APMU_EMAC1_CLK_RES_CTRL, 0, -1, 0, -1, 0,
 	    NULL, 0, 0 },
+	/* PCIe0 / USB3 combo-PHY gates (dbi/slave/master). */
+	{ 28, "k1_pcie0_master", APMU_PCIE_CLK_RES_CTRL_0, 2, -1, 0, -1, 0,
+	    NULL, 0, 0 },
+	{ 29, "k1_pcie0_slave",  APMU_PCIE_CLK_RES_CTRL_0, 1, -1, 0, -1, 0,
+	    NULL, 0, 0 },
+	{ 30, "k1_pcie0_dbi",    APMU_PCIE_CLK_RES_CTRL_0, 0, -1, 0, -1, 0,
+	    NULL, 0, 0 },
 };
 
 /* APMU resets: the listed bit releases the block (deassert = set bit). */
@@ -199,6 +207,12 @@ static const struct smccu_reset k1_apmu_resets[] = {
 	{ 10, APMU_USB_CLK_RES_CTRL,   0, (1u << 11) },	/* RESET_USB30_PHY */
 	{ 35, APMU_EMAC0_CLK_RES_CTRL, 0, (1u << 1) },	/* RESET_EMAC0 */
 	{ 36, APMU_EMAC1_CLK_RES_CTRL, 0, (1u << 1) },	/* RESET_EMAC1 */
+	/* PCIe0 / USB3 combo-PHY resets (master/slave/dbi release by setting
+	   the bit; GLOBAL is active on bit 8, released by clearing it). */
+	{ 23, APMU_PCIE_CLK_RES_CTRL_0, 0, (1u << 5) },	/* RESET_PCIE0_MASTER */
+	{ 24, APMU_PCIE_CLK_RES_CTRL_0, 0, (1u << 4) },	/* RESET_PCIE0_SLAVE */
+	{ 25, APMU_PCIE_CLK_RES_CTRL_0, 0, (1u << 3) },	/* RESET_PCIE0_DBI */
+	{ 26, APMU_PCIE_CLK_RES_CTRL_0, (1u << 8), 0 },	/* RESET_PCIE0_GLOBAL */
 };
 
 static const struct smccu_bank k1_apbc_bank = {

@@ -23,6 +23,8 @@
 #include <dev/ofw/ofw_bus.h>
 #include <dev/ofw/ofw_bus_subr.h>
 
+#include <dev/clk/clk.h>
+#include <dev/hwreset/hwreset.h>
 #include <dev/phy/phy.h>
 
 #define	PHY_TYPE_USB3			4
@@ -118,6 +120,21 @@ spcomb_attach(device_t dev)
 	if (sc->mem_res == NULL) {
 		device_printf(dev, "cannot allocate registers\n");
 		return (ENXIO);
+	}
+
+	/*
+	 * Enable the combo-PHY's clocks and release its resets so the USB3
+	 * PLL can lock.  These live in the shared PCIe0 control register.
+	 */
+	{
+		clk_t clk;
+		hwreset_t rst;
+		int i;
+
+		for (i = 0; clk_get_by_ofw_index(dev, 0, i, &clk) == 0; i++)
+			(void)clk_enable(clk);
+		for (i = 0; hwreset_get_by_ofw_idx(dev, 0, i, &rst) == 0; i++)
+			hwreset_deassert(rst);
 	}
 
 	bzero(&phy_init, sizeof(phy_init));
