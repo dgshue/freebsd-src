@@ -134,6 +134,16 @@ release_aps(void *dummy __unused)
 	CPU_CLR(boot_hart, &mask);
 
 	printf("Release APs\n");
+	{	/* DIAG: BSP view of per-CPU mappings */
+		vm_paddr_t pa;
+		int i;
+		for (i = 1; i <= mp_maxid; i++) {
+			pa = (dpcpu[i - 1] != NULL) ?
+			    pmap_kextract((vm_offset_t)dpcpu[i - 1]) : 0;
+			printf("BSP: dpcpu[%d]=%p pa=%#lx\n", i,
+			    dpcpu[i - 1], (u_long)pa);
+		}
+	}
 
 	sbi_send_ipi(mask.__bits);
 
@@ -162,6 +172,7 @@ init_secondary(uint64_t hart)
 	/* Setup the pcpu pointer */
 	pcpup = &__pcpu[cpuid];
 	__asm __volatile("mv tp, %0" :: "r"(pcpup));
+	sbi_console_putchar(0x61 + cpuid);	/* DIAG: AP arrival */
 
 	/* Workaround: make sure wfi doesn't halt the hart */
 	csr_set(sie, SIE_SSIE);
@@ -171,6 +182,7 @@ init_secondary(uint64_t hart)
 	atomic_add_int(&aps_started, 1);
 	while (!atomic_load_int(&aps_ready))
 		__asm __volatile("wfi");
+	sbi_console_putchar(0x41 + cpuid);	/* DIAG: AP released */
 
 	/* Initialize curthread */
 	KASSERT(PCPU_GET(idlethread) != NULL, ("no idle thread"));
@@ -205,6 +217,19 @@ init_secondary(uint64_t hart)
 	if (bootverbose)
 		printf("Secondary CPU %u fully online\n", cpuid);
 
+	{	/* DIAG: AP view of per-CPU mappings */
+		uint64_t satp_val = csr_read(satp);
+		vm_paddr_t pa;
+		int i;
+		printf("AP%u: hart %lu satp %#lx\n", cpuid,
+		    (u_long)hart, (u_long)satp_val);
+		for (i = 1; i <= mp_maxid; i++) {
+			pa = (dpcpu[i - 1] != NULL) ?
+			    pmap_kextract((vm_offset_t)dpcpu[i - 1]) : 0;
+			printf("AP%u: dpcpu[%d]=%p pa=%#lx\n", cpuid, i,
+			    dpcpu[i - 1], (u_long)pa);
+		}
+	}
 	/* Enter the scheduler */
 	sched_ap_entry();
 
@@ -401,7 +426,7 @@ cpu_init_fdt(u_int id, phandle_t node, u_int addr_size, pcell_t *reg)
 
 	if (bootverbose)
 		printf("Starting CPU %u (hart %lx)\n", cpuid, hart);
-	atomic_store_32(&__riscv_boot_ap[hart], 1);
+	atomic_store_rel_32(&__riscv_boot_ap[hart], 1);
 
 	/* Wait for the AP to switch to its boot stack. */
 	while (atomic_load_int(&aps_started) < naps + 1)

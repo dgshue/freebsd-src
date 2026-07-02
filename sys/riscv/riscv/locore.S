@@ -350,6 +350,9 @@ ENTRY(mpentry)
 	lw	t1, 0(t0)
 	beqz	t1, 1b
 
+	/* Ensure the boot data published before the flag is visible. */
+	fence	r, rw
+
 	/* Setup stack pointer */
 	lla	t0, bootstack
 	ld	sp, 0(t0)
@@ -376,6 +379,8 @@ ENTRY(mpentry)
 
 	.align 2
 mpva:
+	/* Flush translations cached before/across the satp switch. */
+	sfence.vma
 	/* Set the global pointer again, this time with the virtual address. */
 .option push
 .option norelax
