@@ -10,3 +10,4 @@ device		miibus
 device		spacemit_reset
 device		gpio
 device		spacemit_gpio
+device		spacemit_pinctrl

@@ -117,3 +117,4 @@ dev/sdhci/sdhci_fdt_spacemit.c	optional	sdhci_spacemit sdhci fdt
 dev/smte/if_smte.c	optional	smte fdt
 dev/spacemit/spacemit_reset.c	optional	spacemit_reset
 dev/gpio/spacemit/spacemit_gpio.c	optional	spacemit_gpio fdt
+dev/pinctrl/spacemit/spacemit_pinctrl.c	optional	spacemit_pinctrl fdt
