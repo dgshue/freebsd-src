@@ -1,0 +1,69 @@
+# RV2PROD -- PRODUCTION kernel for Orange Pi RV2 (SpacemiT K1, riscv64).
+#
+# Identical to RV2VAL (the current working WLAN validation kernel) in EVERY
+# device/driver respect -- same spacemit drivers, brcmfmac, MMCCAM, wlan +
+# net80211/CCMP, sdhci_spacemit, spacemit_i2c/reset, on-demand bringup work --
+# but with the runtime-cost kernel DEBUG/diagnostic options turned OFF for
+# production performance.
+#
+# What is removed (relative to RV2VAL, which inherits these from GENERIC's
+# `include "std.debug"`): WITNESS, WITNESS_SKIPSPIN, INVARIANTS,
+# INVARIANT_SUPPORT, DEADLKRES, QUEUE_MACRO_DEBUG_TRASH, BUF_TRACKING,
+# FULL_BUF_TRACKING, MALLOC_DEBUG_MAXZONES.  (DIAGNOSTIC / DEBUG_VFS_LOCKS are
+# not enabled on riscv GENERIC, so there is nothing to remove for those.)
+#
+# What is KEPT for serial-debugger recovery: KDB (from GENERIC), plus DDB, GDB,
+# and ALT_BREAK_TO_DEBUGGER (from std.debug).  `makeoptions DEBUG=-g` is kept
+# for symbols; the stripped kernel that ships is the same size class regardless.
+include GENERIC
+ident		RV2PROD
+
+# --- Turn OFF runtime-cost debug/diagnostic options (inherited via std.debug)-
+nooptions	WITNESS
+nooptions	WITNESS_SKIPSPIN
+nooptions	INVARIANTS
+nooptions	INVARIANT_SUPPORT
+nooptions	DEADLKRES
+nooptions	QUEUE_MACRO_DEBUG_TRASH
+nooptions	BUF_TRACKING
+nooptions	FULL_BUF_TRACKING
+nooptions	MALLOC_DEBUG_MAXZONES
+# DDB, GDB, ALT_BREAK_TO_DEBUGGER intentionally retained (recovery path).
+
+options		EARLY_PRINTF=sbi
+nodevice	vt_efifb
+nodevice	uart_ns8250
+device		spacemit_ccu
+device		sdhci_spacemit
+device		smte
+device		miibus
+device		spacemit_reset
+device		gpio
+device		spacemit_gpio
+device		spacemit_pinctrl
+device		dwc3
+device		spacemit_usb2phy
+device		spacemit_combphy
+device		spacemit_tsensor
+device		spacemit_rtc
+device		spacemit_crng
+device		iicbus
+device		iic
+device		spacemit_i2c
+device		regulator
+device		spacemit_p1
+device		spacemit_pcie_phy
+device		pwmbus
+device		pwm
+device		spacemit_pwm
+device		spibus
+device		spigen
+device		spacemit_spi
+device		spacemit_ehci
+device		spacemit_qspi
+
+# --- WLAN: AP6256 (BCM43456) SDIO WiFi -------------------------------------
+options 	MMCCAM
+device		wlan		# net80211 (in-kernel; brcmfmac depends on it)
+device		wlan_ccmp	# WPA2 CCMP cipher in-kernel
+device		brcmfmac	# Broadcom FullMAC WiFi over SDIO (native port)

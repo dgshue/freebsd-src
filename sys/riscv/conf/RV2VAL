@@ -1,0 +1,52 @@
+# RV2VAL -- PCIe-less validation kernel.
+#
+# Identical to RV2 but WITHOUT the spacemit_pcie host-controller driver, so the
+# board boots all the way to multi-user for validating RNG/I2C/PMIC/etc.  The
+# spacemit_pcie1 (empty-slot) attach currently hangs during PHY/link bring-up;
+# dropping the host driver avoids that while the hang fix is validated with a
+# card actually present.  The PCIe CCU clocks + spacemit_pcie_phy remain (they
+# are inert without a host consumer), so the device tree is otherwise intact.
+include GENERIC
+ident		RV2VAL
+options		EARLY_PRINTF=sbi
+nodevice	vt_efifb
+nodevice	uart_ns8250
+device		spacemit_ccu
+device		sdhci_spacemit
+device		smte
+device		miibus
+device		spacemit_reset
+device		gpio
+device		spacemit_gpio
+device		spacemit_pinctrl
+device		dwc3
+device		spacemit_usb2phy
+device		spacemit_combphy
+device		spacemit_tsensor
+device		spacemit_rtc
+device		spacemit_crng
+device		iicbus
+device		iic
+device		spacemit_i2c
+device		regulator
+device		spacemit_p1
+device		spacemit_pcie_phy
+device		pwmbus
+device		pwm
+device		spacemit_pwm
+device		spibus
+device		spigen
+device		spacemit_spi
+device		spacemit_ehci
+device		spacemit_qspi
+
+# --- WLAN: AP6256 (BCM43456) SDIO WiFi -------------------------------------
+# MMCCAM replaces the legacy mmc(4) stack GLOBALLY: the root SD card moves to
+# the CAM stack too (mmcsd0 -> sdda0).  Required for SDIO function enumeration
+# (CMD5) that the brcmfmac driver needs.  This is the highest-risk option in
+# this kernel; the pre-MMCCAM fallback kernel is staged as
+# /root/kernel.RV2VAL.reboot-sdcd on the builder.
+options 	MMCCAM
+device		wlan		# net80211 (in-kernel; brcmfmac depends on it)
+device		wlan_ccmp	# WPA2 CCMP cipher in-kernel
+device		brcmfmac	# Broadcom FullMAC WiFi over SDIO (native port)

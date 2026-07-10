@@ -122,3 +122,27 @@ dev/usb/controller/dwc3/dwc3.c	optional	xhci fdt dwc3
 dev/phy/spacemit/spacemit_usb2phy.c	optional	spacemit_usb2phy fdt
 dev/phy/spacemit/spacemit_combphy.c	optional	spacemit_combphy fdt
 dev/spacemit/spacemit_tsensor.c	optional	spacemit_tsensor fdt
+dev/spacemit/spacemit_rtc.c	optional	spacemit_rtc fdt
+dev/random/spacemit_crng.c	optional	spacemit_crng fdt
+dev/iicbus/controller/spacemit/spacemit_i2c.c	optional	spacemit_i2c fdt
+dev/iicbus/pmic/spacemit/spacemit_p1.c	optional	spacemit_p1 fdt
+dev/phy/spacemit/spacemit_pcie_phy.c	optional	spacemit_pcie_phy fdt
+dev/pwm/controller/spacemit/spacemit_pwm.c	optional	spacemit_pwm fdt
+dev/spibus/controller/spacemit/spacemit_spi.c	optional	spacemit_spi fdt
+dev/flash/spacemit_qspi.c	optional	spacemit_qspi fdt
+dev/pci/controller/spacemit/spacemit_pcie.c	optional	spacemit_pcie pci fdt
+dev/usb/controller/spacemit_ehci.c	optional	spacemit_ehci ehci fdt
+# Broadcom FullMAC WiFi (brcmfmac, native clean-room port; SDIO via MMCCAM).
+# Vendored from narqo/freebsd-brcmfmac (ISC).  PCIe/msgbuf parts included
+# for completeness; only the SDIO path is exercised on the Orange Pi RV2.
+dev/brcmfmac/cfg.c	optional	brcmfmac mmccam wlan
+dev/brcmfmac/core.c	optional	brcmfmac mmccam wlan pci
+dev/brcmfmac/debug.c	optional	brcmfmac mmccam wlan
+dev/brcmfmac/fwil.c	optional	brcmfmac mmccam wlan
+dev/brcmfmac/main.c	optional	brcmfmac mmccam wlan pci
+dev/brcmfmac/msgbuf.c	optional	brcmfmac mmccam wlan pci
+dev/brcmfmac/pcie.c	optional	brcmfmac mmccam wlan pci
+dev/brcmfmac/scan.c	optional	brcmfmac mmccam wlan
+dev/brcmfmac/sdio.c	optional	brcmfmac mmccam wlan
+dev/brcmfmac/sdpcm.c	optional	brcmfmac mmccam wlan
+dev/brcmfmac/security.c	optional	brcmfmac mmccam wlan

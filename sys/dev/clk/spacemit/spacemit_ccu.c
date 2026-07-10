@@ -83,6 +83,8 @@ struct smccu_clk {
 	const uint64_t	*prates;	/* parent rates, indexed by mux */
 	int		nrates;
 	uint64_t	rate;		/* fixed rate when no mux (0 = unknown) */
+	uint32_t	gate_mask;	/* if nonzero, full enable mask (overrides
+					   gate_shift; some blocks need >1 bit) */
 };
 
 struct smccu_reset {
@@ -106,6 +108,26 @@ struct smccu_bank {
  */
 static const uint64_t k1_uart_rates[] = { 57600000, 14745600, 48000000 };
 
+/*
+ * TWSI (I2C) functional clock mux (bits [6:4], width 3): 0 = 31.5 MHz,
+ * 1 = 51.2 MHz, 2 = 61.44 MHz (pll1 dividers).  Func gate bit 1, bus gate
+ * bit 0, reset bit 2 -- all in the respective APBC_TWSIn_CLK_RST register.
+ */
+static const uint64_t k1_twsi_rates[] = { 31500000, 51200000, 61440000 };
+
+/*
+ * PWM functional clock mux (bits [6:4], width 3): 0 = 12.8 MHz (pll1_d192),
+ * 1 = 24 MHz (osc).  Func gate bit 1, bus gate bit 0.
+ */
+static const uint64_t k1_pwm_rates[] = { 12800000, 24000000 };
+
+/*
+ * SSP3 (SPI) functional clock mux (bits [6:4], width 3):
+ * 0 = 6.4 MHz, 1 = 12.8 MHz, 2 = 25.6 MHz, 3 = 51.2 MHz (pll1 dividers).
+ * Func gate bit 1, bus gate bit 0.
+ */
+static const uint64_t k1_ssp_rates[] = { 6400000, 12800000, 25600000, 51200000 };
+
 static const struct smccu_clk k1_apbc_clks[] = {
 	/* id, name,           reg,  gate, mux,w, div,w, parents */
 	{ 0,  "k1_uart0",     0x00,  1,  4, 3, -1, 0, k1_uart_rates, 3, 0 },
@@ -118,6 +140,17 @@ static const struct smccu_clk k1_apbc_clks[] = {
 	{ 7,  "k1_uart8",     0x98,  1,  4, 3, -1, 0, k1_uart_rates, 3, 0 },
 	{ 8,  "k1_uart9",     0x9c,  1,  4, 3, -1, 0, k1_uart_rates, 3, 0 },
 	{ 9,  "k1_gpio",      0x08,  1, -1, 0, -1, 0, NULL, 0, 24000000 },
+	/* Thermal sensor: core func clock gate bit 1, bus clock gate bit 0. */
+	{ 48, "k1_tsen",      0x6c,  1, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 98, "k1_tsen_bus",  0x6c,  0, -1, 0, -1, 0, NULL, 0, 0 },
+	/*
+	 * RTC: core func clock needs BOTH bit 7 and bit 1 set (full enable
+	 * mask), bus clock gate bit 0.  Firmware leaves only bit 1 set, so the
+	 * counter does not tick until we set bit 7 too.
+	 */
+	{ 31, "k1_rtc",       0x28, -1, -1, 0, -1, 0, NULL, 0, 0,
+	    (1u << 7) | (1u << 1) },
+	{ 83, "k1_rtc_bus",   0x28,  0, -1, 0, -1, 0, NULL, 0, 0 },
 	{ 52, "k1_uart0_bus", 0x00,  0, -1, 0, -1, 0, NULL, 0, 0 },
 	{ 53, "k1_uart2_bus", 0x04,  0, -1, 0, -1, 0, NULL, 0, 0 },
 	{ 54, "k1_uart3_bus", 0x24,  0, -1, 0, -1, 0, NULL, 0, 0 },
@@ -128,6 +161,75 @@ static const struct smccu_clk k1_apbc_clks[] = {
 	{ 59, "k1_uart8_bus", 0x98,  0, -1, 0, -1, 0, NULL, 0, 0 },
 	{ 60, "k1_uart9_bus", 0x9c,  0, -1, 0, -1, 0, NULL, 0, 0 },
 	{ 61, "k1_gpio_bus",  0x08,  0, -1, 0, -1, 0, NULL, 0, 0 },
+	/*
+	 * TWSI (I2C) func clocks: mux [6:4] w3, gate bit 1.  Register offsets
+	 * per APBC_TWSIn_CLK_RST.  TWSI8 (reg 0x20) has a hardware quirk where
+	 * reads return 0, and needs both bits 1 and 0 set together (full enable
+	 * mask); it is a fixed 31.5 MHz (no mux) in mainline.
+	 */
+	{ 32, "k1_twsi0",     0x2c,  1,  4, 3, -1, 0, k1_twsi_rates, 3, 0 },
+	{ 33, "k1_twsi1",     0x30,  1,  4, 3, -1, 0, k1_twsi_rates, 3, 0 },
+	{ 34, "k1_twsi2",     0x38,  1,  4, 3, -1, 0, k1_twsi_rates, 3, 0 },
+	{ 35, "k1_twsi4",     0x40,  1,  4, 3, -1, 0, k1_twsi_rates, 3, 0 },
+	{ 36, "k1_twsi5",     0x4c,  1,  4, 3, -1, 0, k1_twsi_rates, 3, 0 },
+	{ 37, "k1_twsi6",     0x60,  1,  4, 3, -1, 0, k1_twsi_rates, 3, 0 },
+	{ 38, "k1_twsi7",     0x68,  1,  4, 3, -1, 0, k1_twsi_rates, 3, 0 },
+	{ 39, "k1_twsi8",     0x20, -1, -1, 0, -1, 0, NULL, 0, 31500000,
+	    (1u << 1) | (1u << 0) },
+	/* TWSI bus clocks: gate bit 0 (TWSI8 bus is a fixed factor, no gate). */
+	{ 84, "k1_twsi0_bus", 0x2c,  0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 85, "k1_twsi1_bus", 0x30,  0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 86, "k1_twsi2_bus", 0x38,  0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 87, "k1_twsi4_bus", 0x40,  0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 88, "k1_twsi5_bus", 0x4c,  0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 89, "k1_twsi6_bus", 0x60,  0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 90, "k1_twsi7_bus", 0x68,  0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 91, "k1_twsi8_bus", 0x20, -1, -1, 0, -1, 0, NULL, 0, 31500000 },
+	/* PWM func clocks: mux [6:4] w3 (12.8/24 MHz), gate bit 1. */
+	{ 10, "k1_pwm0",   0x0c, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 11, "k1_pwm1",   0x10, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 12, "k1_pwm2",   0x14, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 13, "k1_pwm3",   0x18, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 14, "k1_pwm4",   0xa8, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 15, "k1_pwm5",   0xac, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 16, "k1_pwm6",   0xb0, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 17, "k1_pwm7",   0xb4, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 18, "k1_pwm8",   0xb8, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 19, "k1_pwm9",   0xbc, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 20, "k1_pwm10",  0xc0, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 21, "k1_pwm11",  0xc4, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 22, "k1_pwm12",  0xc8, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 23, "k1_pwm13",  0xcc, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 24, "k1_pwm14",  0xd0, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 25, "k1_pwm15",  0xd4, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 26, "k1_pwm16",  0xd8, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 27, "k1_pwm17",  0xdc, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 28, "k1_pwm18",  0xe0, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	{ 29, "k1_pwm19",  0xe4, 1,  4, 3, -1, 0, k1_pwm_rates, 2, 0 },
+	/* PWM bus clocks: gate bit 0. */
+	{ 62, "k1_pwm0_bus",  0x0c, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 63, "k1_pwm1_bus",  0x10, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 64, "k1_pwm2_bus",  0x14, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 65, "k1_pwm3_bus",  0x18, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 66, "k1_pwm4_bus",  0xa8, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 67, "k1_pwm5_bus",  0xac, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 68, "k1_pwm6_bus",  0xb0, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 69, "k1_pwm7_bus",  0xb4, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 70, "k1_pwm8_bus",  0xb8, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 71, "k1_pwm9_bus",  0xbc, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 72, "k1_pwm10_bus", 0xc0, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 73, "k1_pwm11_bus", 0xc4, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 74, "k1_pwm12_bus", 0xc8, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 75, "k1_pwm13_bus", 0xcc, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 76, "k1_pwm14_bus", 0xd0, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 77, "k1_pwm15_bus", 0xd4, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 78, "k1_pwm16_bus", 0xd8, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 79, "k1_pwm17_bus", 0xdc, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 80, "k1_pwm18_bus", 0xe0, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	{ 81, "k1_pwm19_bus", 0xe4, 0, -1, 0, -1, 0, NULL, 0, 0 },
+	/* SSP3 (SPI): func mux [6:4] w3, gate bit 1; bus gate bit 0. */
+	{ 30, "k1_ssp3",      0x7c, 1,  4, 3, -1, 0, k1_ssp_rates, 4, 0 },
+	{ 82, "k1_ssp3_bus",  0x7c, 0, -1, 0, -1, 0, NULL, 0, 0 },
 };
 
 /* APBC resets: bit 2 is an active-high reset in each CLK_RST register. */
@@ -142,6 +244,54 @@ static const struct smccu_reset k1_apbc_resets[] = {
 	{ 7, 0x98, (1u << 2), 0 },	/* RESET_UART8 */
 	{ 8, 0x9c, (1u << 2), 0 },	/* RESET_UART9 */
 	{ 9, 0x08, (1u << 2), 0 },	/* RESET_GPIO */
+	{ 48, 0x6c, (1u << 2), 0 },	/* RESET_TSEN (thermal sensor) */
+	{ 31, 0x28, (1u << 2), 0 },	/* RESET_RTC */
+	/* TWSI (I2C) resets: bit 2 active-high, per APBC_TWSIn_CLK_RST. */
+	{ 32, 0x2c, (1u << 2), 0 },	/* RESET_TWSI0 */
+	{ 33, 0x30, (1u << 2), 0 },	/* RESET_TWSI1 */
+	{ 34, 0x38, (1u << 2), 0 },	/* RESET_TWSI2 */
+	{ 35, 0x40, (1u << 2), 0 },	/* RESET_TWSI4 */
+	{ 36, 0x4c, (1u << 2), 0 },	/* RESET_TWSI5 */
+	{ 37, 0x60, (1u << 2), 0 },	/* RESET_TWSI6 */
+	{ 38, 0x68, (1u << 2), 0 },	/* RESET_TWSI7 */
+	/*
+	 * RESET_TWSI8 (id 39, reg 0x20) is DELIBERATELY OMITTED.
+	 *
+	 * APBC_TWSI8_CLK_RST (0x20) has the hardware quirk that reads always
+	 * return 0 (documented in mainline ccu-k1.c).  The reset assert/deassert
+	 * does a read-modify-write: it reads 0x20 (gets 0), clears the reset
+	 * mask, ORs the (de)assert mask, and writes back.  For the deassert
+	 * (deassert_mask 0) that writes 0 to 0x20 -- which WIPES the func-clock
+	 * gate bits (1|0) that clk_enable() just set.  So the i2c driver's
+	 * hwreset_deassert() was ungating TWSI8 immediately after enabling it,
+	 * leaving the whole i2c8 register block UNCLOCKED (ISR/IBMR read 0, every
+	 * transfer times out).  Mainline has NO reset node for twsi8 for exactly
+	 * this reason and treats 0x20 as gate-only; we do the same.  With no
+	 * reset entry, hwreset_get in the i2c driver fails and the driver skips
+	 * the reset pulse (sc->reset = NULL), leaving the clock gate intact.
+	 */
+	/* PWM resets: bit 2 active-high, per APBC_PWMn_CLK_RST. */
+	{ 10, 0x0c, (1u << 2), 0 },	/* RESET_PWM0 */
+	{ 11, 0x10, (1u << 2), 0 },	/* RESET_PWM1 */
+	{ 12, 0x14, (1u << 2), 0 },	/* RESET_PWM2 */
+	{ 13, 0x18, (1u << 2), 0 },	/* RESET_PWM3 */
+	{ 14, 0xa8, (1u << 2), 0 },	/* RESET_PWM4 */
+	{ 15, 0xac, (1u << 2), 0 },	/* RESET_PWM5 */
+	{ 16, 0xb0, (1u << 2), 0 },	/* RESET_PWM6 */
+	{ 17, 0xb4, (1u << 2), 0 },	/* RESET_PWM7 */
+	{ 18, 0xb8, (1u << 2), 0 },	/* RESET_PWM8 */
+	{ 19, 0xbc, (1u << 2), 0 },	/* RESET_PWM9 */
+	{ 20, 0xc0, (1u << 2), 0 },	/* RESET_PWM10 */
+	{ 21, 0xc4, (1u << 2), 0 },	/* RESET_PWM11 */
+	{ 22, 0xc8, (1u << 2), 0 },	/* RESET_PWM12 */
+	{ 23, 0xcc, (1u << 2), 0 },	/* RESET_PWM13 */
+	{ 24, 0xd0, (1u << 2), 0 },	/* RESET_PWM14 */
+	{ 25, 0xd4, (1u << 2), 0 },	/* RESET_PWM15 */
+	{ 26, 0xd8, (1u << 2), 0 },	/* RESET_PWM16 */
+	{ 27, 0xdc, (1u << 2), 0 },	/* RESET_PWM17 */
+	{ 28, 0xe0, (1u << 2), 0 },	/* RESET_PWM18 */
+	{ 29, 0xe4, (1u << 2), 0 },	/* RESET_PWM19 */
+	{ 30, 0x7c, (1u << 2), 0 },	/* RESET_SSP3 (SPI) */
 };
 
 /*
@@ -160,10 +310,16 @@ static const uint64_t k1_sdh2_rates[] = {
 #define	APMU_SDH0_CLK_RES_CTRL	0x054
 #define	APMU_SDH1_CLK_RES_CTRL	0x058
 #define	APMU_USB_CLK_RES_CTRL	0x05c
+#define	APMU_AES_CLK_RES_CTRL	0x068	/* AES engine + HW CRNG */
 #define	APMU_SDH2_CLK_RES_CTRL	0x0e0
 #define	APMU_EMAC0_CLK_RES_CTRL	0x3e4
 #define	APMU_EMAC1_CLK_RES_CTRL	0x3ec
 #define	APMU_PCIE_CLK_RES_CTRL_0 0x3cc	/* combo PHY 0 = USB3 / PCIe0 */
+#define	APMU_PCIE_CLK_RES_CTRL_1 0x3d4	/* PCIe1 (expansion slot) */
+#define	APMU_PCIE_CLK_RES_CTRL_2 0x3dc	/* PCIe2 (expansion slot) */
+
+/* AES functional clock parents (mux bit 6): pll1_d12 = 204.8 MHz, d24 = 102.4 MHz. */
+static const uint64_t k1_aes_rates[] = { 204800000, 102400000 };
 
 static const struct smccu_clk k1_apmu_clks[] = {
 	/* id, name,          reg,                    gate, mux,w, div,w */
@@ -192,6 +348,23 @@ static const struct smccu_clk k1_apmu_clks[] = {
 	    NULL, 0, 0 },
 	{ 30, "k1_pcie0_dbi",    APMU_PCIE_CLK_RES_CTRL_0, 0, -1, 0, -1, 0,
 	    NULL, 0, 0 },
+	/* PCIe1 gates (master/slave/dbi = bits 2/1/0), same layout as PCIe0. */
+	{ 31, "k1_pcie1_master", APMU_PCIE_CLK_RES_CTRL_1, 2, -1, 0, -1, 0,
+	    NULL, 0, 0 },
+	{ 32, "k1_pcie1_slave",  APMU_PCIE_CLK_RES_CTRL_1, 1, -1, 0, -1, 0,
+	    NULL, 0, 0 },
+	{ 33, "k1_pcie1_dbi",    APMU_PCIE_CLK_RES_CTRL_1, 0, -1, 0, -1, 0,
+	    NULL, 0, 0 },
+	/* PCIe2 gates. */
+	{ 34, "k1_pcie2_master", APMU_PCIE_CLK_RES_CTRL_2, 2, -1, 0, -1, 0,
+	    NULL, 0, 0 },
+	{ 35, "k1_pcie2_slave",  APMU_PCIE_CLK_RES_CTRL_2, 1, -1, 0, -1, 0,
+	    NULL, 0, 0 },
+	{ 36, "k1_pcie2_dbi",    APMU_PCIE_CLK_RES_CTRL_2, 0, -1, 0, -1, 0,
+	    NULL, 0, 0 },
+	/* AES engine / HW CRNG functional clock: mux bit 6 (w1), gate bit 5. */
+	{ 20, "k1_aes",       APMU_AES_CLK_RES_CTRL,   5,  6, 1, -1, 0,
+	    k1_aes_rates, nitems(k1_aes_rates), 0 },
 };
 
 /* APMU resets: the listed bit releases the block (deassert = set bit). */
@@ -207,12 +380,23 @@ static const struct smccu_reset k1_apmu_resets[] = {
 	{ 10, APMU_USB_CLK_RES_CTRL,   0, (1u << 11) },	/* RESET_USB30_PHY */
 	{ 35, APMU_EMAC0_CLK_RES_CTRL, 0, (1u << 1) },	/* RESET_EMAC0 */
 	{ 36, APMU_EMAC1_CLK_RES_CTRL, 0, (1u << 1) },	/* RESET_EMAC1 */
+	{ 14, APMU_AES_CLK_RES_CTRL,   0, (1u << 4) },	/* RESET_AES (CRNG) */
 	/* PCIe0 / USB3 combo-PHY resets (master/slave/dbi release by setting
 	   the bit; GLOBAL is active on bit 8, released by clearing it). */
 	{ 23, APMU_PCIE_CLK_RES_CTRL_0, 0, (1u << 5) },	/* RESET_PCIE0_MASTER */
 	{ 24, APMU_PCIE_CLK_RES_CTRL_0, 0, (1u << 4) },	/* RESET_PCIE0_SLAVE */
 	{ 25, APMU_PCIE_CLK_RES_CTRL_0, 0, (1u << 3) },	/* RESET_PCIE0_DBI */
 	{ 26, APMU_PCIE_CLK_RES_CTRL_0, (1u << 8), 0 },	/* RESET_PCIE0_GLOBAL */
+	/* PCIe1 resets: master/slave/dbi release on bits 5/4/3; global on bit 8. */
+	{ 27, APMU_PCIE_CLK_RES_CTRL_1, 0, (1u << 5) },	/* RESET_PCIE1_MASTER */
+	{ 28, APMU_PCIE_CLK_RES_CTRL_1, 0, (1u << 4) },	/* RESET_PCIE1_SLAVE */
+	{ 29, APMU_PCIE_CLK_RES_CTRL_1, 0, (1u << 3) },	/* RESET_PCIE1_DBI */
+	{ 30, APMU_PCIE_CLK_RES_CTRL_1, (1u << 8), 0 },	/* RESET_PCIE1_GLOBAL */
+	/* PCIe2 resets. */
+	{ 31, APMU_PCIE_CLK_RES_CTRL_2, 0, (1u << 5) },	/* RESET_PCIE2_MASTER */
+	{ 32, APMU_PCIE_CLK_RES_CTRL_2, 0, (1u << 4) },	/* RESET_PCIE2_SLAVE */
+	{ 33, APMU_PCIE_CLK_RES_CTRL_2, 0, (1u << 3) },	/* RESET_PCIE2_DBI */
+	{ 34, APMU_PCIE_CLK_RES_CTRL_2, (1u << 8), 0 },	/* RESET_PCIE2_GLOBAL */
 };
 
 static const struct smccu_bank k1_apbc_bank = {
@@ -310,21 +494,24 @@ smccu_clknode_set_gate(struct clknode *clk, bool enable)
 	struct smccu_softc *sc;
 	struct smccu_clknode_sc *csc;
 	const struct smccu_clk *def;
-	uint32_t reg;
+	uint32_t mask, reg;
 
 	sc = device_get_softc(clknode_get_device(clk));
 	csc = clknode_get_softc(clk);
 	def = csc->def;
 
-	if (def->gate_shift < 0)
+	if (def->gate_shift < 0 && def->gate_mask == 0)
 		return (0);
+
+	mask = (def->gate_mask != 0) ? def->gate_mask :
+	    (1u << def->gate_shift);
 
 	DEVICE_LOCK(clk);
 	reg = READ4(sc, def->reg);
 	if (enable)
-		reg |= (1u << def->gate_shift);
+		reg |= mask;
 	else
-		reg &= ~(1u << def->gate_shift);
+		reg &= ~mask;
 	WRITE4(sc, def->reg, reg);
 	DEVICE_UNLOCK(clk);
 

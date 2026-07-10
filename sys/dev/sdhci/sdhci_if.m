@@ -82,6 +82,14 @@ CODE {
 	{
 
 	}
+
+	static int
+	null_platform_update_ios(device_t brdev __unused,
+	    struct sdhci_slot *slot __unused)
+	{
+
+		return (0);
+	}
 }
 
 INTERFACE sdhci;
@@ -156,6 +164,11 @@ METHOD void platform_finish_transfer {
 	device_t		brdev;
 	struct sdhci_slot	*slot;
 }
+
+METHOD int platform_update_ios {
+	device_t		brdev;
+	struct sdhci_slot	*slot;
+} DEFAULT null_platform_update_ios;
 
 METHOD uint32_t min_freq {
 	device_t		brdev;

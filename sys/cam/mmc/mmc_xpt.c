@@ -103,6 +103,7 @@ typedef enum {
 	PROBE_SEND_RELATIVE_ADDR,
 	PROBE_MMC_SET_RELATIVE_ADDR,
 	PROBE_SELECT_CARD,
+	PROBE_SDIO_SET_BUS_WIDTH,
 	PROBE_DONE,
 	PROBE_INVALID
 } probe_action;
@@ -126,6 +127,7 @@ static char *probe_action_text[] = {
 	"PROBE_SEND_RELATIVE_ADDR",
 	"PROBE_MMC_SET_RELATIVE_ADDR",
 	"PROBE_SELECT_CARD",
+	"PROBE_SDIO_SET_BUS_WIDTH",
 	"PROBE_DONE",
 	"PROBE_INVALID"
 };
@@ -178,8 +180,31 @@ typedef struct {
 #define PROBE_FLAG_ACMD_SENT	0x1 /* CMD55 is sent, card expects ACMD */
 #define PROBE_FLAG_HOST_CAN_DO_18V   0x2 /* Host can do 1.8V signaling */
 	uint8_t         acmd41_count; /* how many times ACMD41 has been issued */
+	uint16_t        sdio_init_count; /* CMD5 (IO_SEND_OP_COND) attempts */
 	struct cam_periph *periph;
 } mmcprobe_softc;
+
+/*
+ * CMD5 (IO_SEND_OP_COND) retry budget for SDIO enumeration.
+ *
+ * Linux mmc_send_io_op_cond() (drivers/mmc/core/sdio_ops.c) polls CMD5 up to
+ * 100 times with a 10 ms delay between attempts (~1 s) before giving up,
+ * because an SDIO device (e.g. the AP6256/BCM43456 WiFi module) can take time
+ * to bring its I/O section out of reset after power-on -- until then CMD5 gets
+ * NO response (timeout, no CRC).  Upstream FreeBSD treats the very first CMD5
+ * command-error as "not an SDIO card" and bails immediately to memory init,
+ * giving the device zero settling time.  Match Linux: retry CMD5 on
+ * command-error with a delay, up to this budget, before concluding non-SDIO.
+ */
+/*
+ * Budget: 60 attempts x 5 ms = up to 300 ms of settling, ample for an SDIO
+ * WiFi module to bring its I/O section up after WL_REG_ON (Linux's worst case
+ * is ~1 s, but it SLEEPS between polls; this done-handler path busy-waits with
+ * DELAY, so keep the total bounded to avoid holding the CAM lock too long while
+ * still giving the card far more than one shot).
+ */
+#define	MMC_SDIO_INIT_RETRIES	60
+#define	MMC_SDIO_INIT_DELAY_US	5000	/* 5 ms between CMD5 attempts */
 
 /* XPort functions -- an interface to CAM at periph side */
 
@@ -499,6 +524,7 @@ static struct periph_driver probe_driver =
 PERIPHDRIVER_DECLARE(mmcprobe, probe_driver);
 
 #define	CARD_ID_FREQUENCY 400000 /* Spec requires 400kHz max during ID phase. */
+#define	SDIO_FULLSPEED_FREQ 25000000
 
 static void
 probe_periph_init(void)
@@ -531,6 +557,7 @@ mmcprobe_register(struct cam_periph *periph, void *arg)
 
 	softc->flags = 0;
 	softc->acmd41_count = 0;
+	softc->sdio_init_count = 0;
 	periph->softc = softc;
 	softc->periph = periph;
 	softc->action = PROBE_INVALID;
@@ -775,11 +802,35 @@ mmcprobe_start(struct cam_periph *periph, union ccb *start_ccb)
 		mmcio->cmd.flags = MMC_RSP_R2 | MMC_CMD_BCR;
 		mmcio->stop.opcode = 0;
 		break;
+	case PROBE_SDIO_SET_BUS_WIDTH:
+	{
+		uint32_t mmc_arg = SD_IO_RW_ADR(SD_IO_CCCR_BUS_WIDTH)
+			| SD_IO_RW_DAT(CCCR_BUS_WIDTH_4)
+			| SD_IO_RW_WR | SD_IO_RW_RAW;
+		cam_fill_mmcio(&start_ccb->mmcio,
+			       /*retries*/ 0,
+			       /*cbfcnp*/ mmcprobe_done,
+			       /*flags*/ CAM_DIR_NONE,
+			       /*mmc_opcode*/ SD_IO_RW_DIRECT,
+			       /*mmc_arg*/ mmc_arg,
+			       /*mmc_flags*/ MMC_RSP_R5 | MMC_CMD_AC,
+			       /*mmc_data*/ NULL,
+			       /*timeout*/ 1000);
+		break;
+	}
 	case PROBE_DONE:
 		CAM_DEBUG(start_ccb->ccb_h.path, CAM_DEBUG_PROBE, ("Start with PROBE_DONE\n"));
 		init_standard_ccb(start_ccb, XPT_SET_TRAN_SETTINGS);
 		cts->ios.bus_mode = pushpull;
 		cts->ios_valid = MMC_BM;
+		if (path->device->mmc_ident_data.card_features &
+		    CARD_FEATURE_SDIO) {
+			cts->ios.clock = SDIO_FULLSPEED_FREQ;
+			cts->ios.timing = bus_timing_normal;
+			cts->ios_valid |= MMC_CLK | MMC_BT;
+			cts->ios.bus_width = bus_width_4;
+			cts->ios_valid |= MMC_BW;
+		}
 		xpt_action(start_ccb);
 		return;
 		/* NOTREACHED */
@@ -925,10 +976,32 @@ mmcprobe_done(struct cam_periph *periph, union ccb *done_ccb)
 		    mmcio->cmd.resp[3]));
 
 		/*
-		 * Error here means that this card is not SDIO,
-		 * so proceed with memory init as if nothing has happened
+		 * A command error here normally means "not an SDIO card", so
+		 * upstream proceeds to memory init.  BUT an SDIO WiFi module
+		 * (AP6256/BCM43456) needs time to bring its I/O section out of
+		 * reset after power-on, during which CMD5 gets NO response
+		 * (timeout, no CRC).  Linux polls CMD5 up to 100x with a 10 ms
+		 * delay between attempts before giving up; upstream FreeBSD gave
+		 * it exactly one shot.  Match Linux: on command-error, wait 10 ms
+		 * and retry CMD5 up to MMC_SDIO_INIT_RETRIES times before
+		 * concluding the card is not SDIO.  The inquiry arg stays 0 (io_ocr
+		 * is still 0 until we get a valid response), so re-issuing
+		 * PROBE_SDIO_INIT sends the same inquiry CMD5 again.
 		 */
 		if (err != MMC_ERR_NONE) {
+			if (softc->sdio_init_count < MMC_SDIO_INIT_RETRIES) {
+				softc->sdio_init_count++;
+				CAM_DEBUG(done_ccb->ccb_h.path, CAM_DEBUG_PROBE,
+				    ("CMD5 no response (err %d), retry %u/%u after "
+				    "%u us\n", err, softc->sdio_init_count,
+				    MMC_SDIO_INIT_RETRIES, MMC_SDIO_INIT_DELAY_US));
+				DELAY(MMC_SDIO_INIT_DELAY_US);
+				/* Stay in PROBE_SDIO_INIT: re-issue CMD5. */
+				break;
+			}
+			CAM_DEBUG(done_ccb->ccb_h.path, CAM_DEBUG_PROBE,
+			    ("CMD5 still no response after %u retries; "
+			    "treating as non-SDIO\n", softc->sdio_init_count));
 			PROBE_SET_ACTION(softc, PROBE_SEND_APP_OP_COND);
 			break;
 		}
@@ -1160,6 +1233,22 @@ mmcprobe_done(struct cam_periph *periph, union ccb *done_ccb)
 			break;
 		}
 
+		if (path->device->mmc_ident_data.card_features &
+		    CARD_FEATURE_SDIO)
+			PROBE_SET_ACTION(softc, PROBE_SDIO_SET_BUS_WIDTH);
+		else
+			PROBE_SET_ACTION(softc, PROBE_DONE);
+		break;
+	}
+	case PROBE_SDIO_SET_BUS_WIDTH: {
+		mmcio = &done_ccb->mmcio;
+		err = mmcio->cmd.error;
+		if (err != MMC_ERR_NONE) {
+			CAM_DEBUG(done_ccb->ccb_h.path, CAM_DEBUG_PROBE,
+				  ("PROBE_SDIO_SET_BUS_WIDTH: error %d\n",
+				   err));
+		}
+		/* Proceed regardless; 1-bit still works. */
 		PROBE_SET_ACTION(softc, PROBE_DONE);
 		break;
 	}

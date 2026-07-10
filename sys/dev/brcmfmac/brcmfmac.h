@@ -1,0 +1,514 @@
+// SPDX-License-Identifier: ISC
+/*
+ * Copyright (c) 2010-2022 Broadcom Corporation
+ * Copyright (c) brcmfmac-freebsd contributors
+ *
+ * Based on the Linux brcmfmac driver.
+ */
+
+/* Broadcom FullMAC WiFi driver for FreeBSD */
+
+#ifndef _BRCMFMAC_H_
+#define _BRCMFMAC_H_
+
+#include <sys/types.h>
+#include <sys/bus.h>
+#include <sys/_task.h>
+#include <sys/malloc.h>
+#include <sys/socket.h>
+
+#include <machine/bus.h>
+
+#include <net/if.h>
+#include <net/if_media.h>
+#include <net/ethernet.h>
+
+#include <net80211/ieee80211_var.h>
+
+#include "debug.h"
+
+struct sdio_func;
+
+/*
+ * SDIO core register offsets (from struct sdpcmd_regs in Linux sdio.h).
+ * Single definition — sdio.c and sdpcm.c both include this header.
+ */
+#define SD_REG_INTSTATUS		0x020
+#define SD_REG_HOSTINTMASK		0x024
+#define SD_REG_TOSBMAILBOX		0x040
+#define SD_REG_TOSBMAILBOXDATA		0x048
+#define SD_REG_TOHOSTMAILBOXDATA	0x04C
+
+/* intstatus bits — to-host mailbox software interrupts (bits 4-7) */
+#define I_HMB_FC_STATE		0x00000010	/* I_HMB_SW0 */
+#define I_HMB_FC_CHANGE		0x00000020	/* I_HMB_SW1 */
+#define I_HMB_FRAME_IND		0x00000040	/* I_HMB_SW2 */
+#define I_HMB_HOST_INT		0x00000080	/* I_HMB_SW3 */
+#define I_HMB_SW_MASK		0x000000F0
+
+/* tosbmailbox register bits (NOT intstatus bit positions) */
+#define SMB_NAK			0x01
+#define SMB_INT_ACK		0x02
+
+/* tosbmailboxdata */
+#define SMB_DATA_VERSION_SHIFT	16
+
+/* tohostmailboxdata */
+#define HMB_DATA_NAKHANDLED	0x0001
+#define HMB_DATA_DEVREADY	0x0002
+#define HMB_DATA_FC		0x0004
+#define HMB_DATA_FWREADY	0x0008
+#define HMB_DATA_FWHALT		0x0010
+#define HMB_DATA_FCDATA_MASK	0xFF000000
+#define HMB_DATA_FCDATA_SHIFT	24
+
+/* Chip enumeration base address — used for F2 frame port window */
+#define SI_ENUM_BASE		0x18000000
+
+/* PCI IDs */
+#define PCI_VENDOR_BROADCOM 0x14e4
+#define PCI_DEVICE_BCM4350  0x43a3
+
+/* Device ID table entry */
+struct brcmf_dev_id {
+	uint16_t vendor;
+	uint16_t device;
+	const char *desc;
+};
+
+/* Core info from EROM */
+struct brcmf_coreinfo {
+	uint32_t id;
+	uint32_t rev;
+	uint32_t base;
+	uint32_t wrapbase;
+};
+
+/* Chip info from ID register */
+struct brcmf_chipinfo {
+	uint32_t chip;
+	uint32_t chiprev;
+	uint32_t socitype;
+};
+
+/* Shared RAM info parsed from firmware */
+struct brcmf_pcie_shared_info {
+	uint32_t tcm_base_address;
+	uint32_t flags;
+	uint8_t  version;
+	uint16_t max_rxbufpost;
+	uint32_t rx_dataoffset;
+	uint32_t htod_mb_data_addr;
+	uint32_t dtoh_mb_data_addr;
+	uint32_t ring_info_addr;
+	uint32_t dma_idx_sz;
+	uint32_t console_addr;
+};
+
+/* Ring IDs */
+#define BRCMF_H2D_MSGRING_CONTROL_SUBMIT   0
+#define BRCMF_H2D_MSGRING_RXPOST_SUBMIT    1
+#define BRCMF_D2H_MSGRING_CONTROL_COMPLETE 2
+#define BRCMF_D2H_MSGRING_TX_COMPLETE      3
+#define BRCMF_D2H_MSGRING_RX_COMPLETE      4
+#define BRCMF_NROF_H2D_COMMON_MSGRINGS     2
+#define BRCMF_NROF_D2H_COMMON_MSGRINGS     3
+#define BRCMF_NROF_COMMON_MSGRINGS         5
+
+/* Ring buffer */
+struct brcmf_pcie_ringbuf {
+	void *buf;		  /* DMA buffer virtual address */
+	bus_addr_t dma_handle;	  /* DMA buffer physical address */
+	bus_dma_tag_t dma_tag;
+	bus_dmamap_t dma_map;
+	uint32_t w_idx_addr;	  /* TCM offset for write index */
+	uint32_t r_idx_addr;	  /* TCM offset for read index */
+	uint16_t w_ptr;		  /* local write pointer */
+	uint16_t r_ptr;		  /* local read pointer */
+	uint16_t id;
+	uint16_t depth;		  /* max items */
+	uint16_t item_len;	  /* bytes per item */
+};
+
+/* Control buffer tracking */
+struct brcmf_ctrlbuf {
+	void *buf;
+	bus_addr_t paddr;
+	bus_dma_tag_t dma_tag;
+	bus_dmamap_t dma_map;
+	uint32_t pktid;
+};
+
+/* TX buffer tracking */
+#define BRCMF_TX_RING_SIZE	256
+
+struct brcmf_txbuf {
+	struct mbuf *m;
+	bus_dmamap_t dma_map;
+	bus_dma_tag_t dma_tag;
+	bus_addr_t paddr;
+};
+
+struct brcmf_softc;
+
+/* Bus-agnostic operations (PCIe: msgbuf, SDIO: SDPCM+BCDC) */
+struct brcmf_bus_ops {
+	int (*ioctl)(struct brcmf_softc *sc, uint32_t cmd, int set,
+	    void *buf, uint32_t len, uint32_t *resp_len);
+	int (*tx)(struct brcmf_softc *sc, struct mbuf *m);
+	int (*flowring_create)(struct brcmf_softc *sc, const uint8_t *da);
+	void (*flowring_delete)(struct brcmf_softc *sc);
+	void (*cleanup)(struct brcmf_softc *sc);
+};
+
+/* Per-device softc */
+struct brcmf_softc {
+	device_t dev;
+	/*
+	 * ROUND 45: WLAN bring-up is DECOUPLED from boot.  attach registers the
+	 * device idle (no firmware); the firmware-loading bring-up runs on demand
+	 * from userland (write dev.brcmfmac.<unit>.bringup=1) on a PRIVATE
+	 * taskqueue+thread (never the shared taskqueue_thread, never a boot hook).
+	 */
+	struct task bringup_task;	/* on-demand firmware bring-up (round 45) */
+	struct taskqueue *bringup_tq;	/* private tq for the bring-up (round 45) */
+	int bringup_requested;		/* trigger fired once (guard) */
+	int bringup_done;		/* bring-up completed OK */
+	const struct brcmf_bus_ops *bus_ops;
+	struct resource *reg_res; /* BAR0 */
+	struct resource *tcm_res; /* BAR2 (TCM) */
+	int reg_rid;
+	int tcm_rid;
+	bus_space_tag_t reg_bst;
+	bus_space_handle_t reg_bsh;
+	bus_space_tag_t tcm_bst;
+	bus_space_handle_t tcm_bsh;
+	uint32_t chip;
+	uint32_t chiprev;
+	uint32_t ram_base;
+	uint32_t ram_size;
+	struct brcmf_coreinfo armcore;
+	struct brcmf_coreinfo ramcore;
+	struct brcmf_coreinfo d11core;
+	struct brcmf_coreinfo pciecore;
+	struct brcmf_coreinfo sdiocore;
+	struct brcmf_pcie_shared_info shared;
+	void *nvram;
+	uint32_t nvram_len;
+
+	/* SDIO-specific */
+	struct sdio_func *sdio_func1;	/* F1: backplane access */
+	struct sdio_func *sdio_func2;	/* F2: data transfer */
+	uint32_t sdio_window;		/* current backplane window */
+	uint8_t sdpcm_tx_seq;		/* SDPCM TX sequence number */
+	uint8_t sdpcm_rx_seq;		/* SDPCM last received seq */
+	uint8_t sdpcm_max_seq;		/* firmware TX credit limit */
+	uint8_t sdpcm_fcmask;		/* per-priority flow-control bitmap */
+	int sdpcm_flowctl;		/* firmware flow-control active */
+	uint32_t sdpcm_shared_flags;	/* flags from sdpcm_shared struct */
+	uint16_t sdpcm_reqid;		/* BCDC request ID counter */
+	uint8_t sdpcm_txbuf[2048];
+	/* SDPCM ioctl buffers — too large for 16KB kernel stack */
+#define BRCMF_SDPCM_CTL_BUFSZ	(12 + 16 + 8192)
+	uint8_t sdpcm_ioctl_tx[BRCMF_SDPCM_CTL_BUFSZ];
+	uint8_t sdpcm_ioctl_rx[BRCMF_SDPCM_CTL_BUFSZ];
+	uint8_t sdpcm_data_tx[2048];	/* BCDC+payload for brcmf_sdpcm_tx */
+	uint8_t sdpcm_poll_rx[BRCMF_SDPCM_CTL_BUFSZ]; /* RX poll buffer */
+	int sdpcm_poll_started;		/* guard for stop_poll */
+	struct callout sdpcm_callout;	/* RX poll callout (50ms) */
+	struct task sdpcm_rx_task;	/* RX processing task */
+	struct task sdpcm_tx_task;	/* TX processing task */
+	struct taskqueue *sdpcm_tq;	/* dedicated taskqueue for rx/tx tasks */
+	struct sx sdio_lock;		/* serializes all F2 SDIO access (sleepable) */
+
+	/* TX queue — network stack cannot sleep, so we queue and send from task */
+	struct mtx tx_queue_mtx;	/* protects tx_queue_head/tail */
+	struct mbuf *tx_queue_head;	/* queued TX mbufs */
+	struct mbuf **tx_queue_tail;	/* pointer to last m_nextpkt */
+
+	/* Ring info from firmware (PCIe-specific) */
+	uint32_t ringmem_addr;	  /* TCM address of ring memory descriptors */
+	uint32_t h2d_w_idx_addr;  /* TCM address of H2D write indices */
+	uint32_t h2d_r_idx_addr;  /* TCM address of H2D read indices */
+	uint32_t d2h_w_idx_addr;  /* TCM address of D2H write indices */
+	uint32_t d2h_r_idx_addr;  /* TCM address of D2H read indices */
+	uint16_t max_flowrings;
+	uint16_t max_submissionrings;
+	uint16_t max_completionrings;
+
+	/* Common rings */
+	struct brcmf_pcie_ringbuf *commonrings[BRCMF_NROF_COMMON_MSGRINGS];
+
+	/* DMA index buffers (when DMA_INDEX flag is set) */
+	void *idx_buf;
+	bus_addr_t idx_buf_dma;
+	bus_dma_tag_t idx_dma_tag;
+	bus_dmamap_t idx_dma_map;
+	uint32_t idx_buf_sz;
+
+	/* Scratch and ring update buffers */
+	void *scratch_buf;
+	bus_addr_t scratch_dma;
+	bus_dma_tag_t scratch_dma_tag;
+	bus_dmamap_t scratch_dma_map;
+
+	void *ringupd_buf;
+	bus_addr_t ringupd_dma;
+	bus_dma_tag_t ringupd_dma_tag;
+	bus_dmamap_t ringupd_dma_map;
+
+	/* Interrupt */
+	struct resource *irq_res;
+	int irq_rid;
+	void *irq_handle;
+	struct task isr_task;
+	struct taskqueue *isr_tq;
+
+	/* IOCTL request DMA buffer (firmware reads from this) */
+	void *ioctl_reqbuf;
+	bus_addr_t ioctl_reqbuf_dma;
+	bus_dma_tag_t ioctl_reqbuf_tag;
+	bus_dmamap_t ioctl_reqbuf_map;
+
+	/* IOCTL response staging (regular memory) */
+	void *ioctl_respbuf;
+
+	/* Control response/event buffers */
+	struct brcmf_ctrlbuf *ioctlresp_buf;
+	struct brcmf_ctrlbuf *event_buf;
+	uint32_t cur_ioctlrespbuf;
+	uint32_t cur_eventbuf;
+
+	/* RX data buffers */
+	struct brcmf_ctrlbuf *rxbuf;
+	uint32_t rxbufpost;
+
+	/* TX buffers */
+	struct brcmf_txbuf txbuf[BRCMF_TX_RING_SIZE];
+	uint32_t tx_pktid_next;
+	struct brcmf_pcie_ringbuf *flowring;
+	int flowring_create_done;
+	int flowring_create_status;
+
+	/* Request ID counter */
+	uint16_t reqid;
+
+	/* IOCTL state */
+	struct mtx ioctl_mtx;
+	uint16_t ioctl_trans_id;
+	uint16_t ioctl_pending_trans_id;
+	int ioctl_status;
+	uint32_t ioctl_resp_len;
+	int ioctl_completed;
+
+	/*
+	 * ROUND 49c: raw firmware BCME status from the most recent control
+	 * ioctl that the firmware rejected.  The SDIO/BCDC path maps every
+	 * firmware error to EIO before returning, which hides the real reason
+	 * (BCME_BADARG=-2, BCME_NOTAP=-6, BCME_NOTDOWN=-5, ...).  Callers that
+	 * need the real code read this after a failed brcmf_fil_* call.
+	 */
+	int last_fwerr;
+
+	/* Firmware health */
+	int fw_dead;
+	int detaching;
+	volatile u_int d2h_processing;
+	struct callout watchdog;
+
+	/* Diagnostic counters */
+	uint32_t isr_filter_count;
+	uint32_t isr_task_count;
+	uint32_t tx_count;
+	uint32_t tx_drops;
+	uint32_t tx_complete_count;
+	uint32_t rx_complete_count;
+	uint32_t rx_deliver_fail;  /* m_get2 allocation failures */
+	uint32_t rx_repost_fail;   /* H2D rxpost ring full at repost time */
+	uint32_t watchdog_last_isr;
+	uint32_t watchdog_stall_count;
+	uint32_t watchdog_tick;
+
+	/* net80211 */
+	struct ieee80211com ic;
+	uint8_t macaddr[ETHER_ADDR_LEN];
+	int running;
+	int io_type; /* 1=D11N, 2=D11AC */
+
+	/* Feature flags (detected from firmware) */
+	int feat_sup_wpa;  /* firmware supplicant supported */
+	int feat_mfp;      /* management frame protection */
+	int feat_mbss;     /* multi-BSS */
+	int feat_p2p;      /* P2P */
+	int feat_sae;      /* WPA3-SAE */
+	int feat_wpaie;    /* wpaie iovar accepted */
+
+	/* Scan state */
+	uint16_t escan_sync_id;
+	int scan_active;
+	int scan_complete;
+	struct task scan_task;
+
+	/* Link state */
+	int link_up;
+	struct task link_task;
+	struct task restart_task;
+	uint8_t join_bssid[6];
+	int join_chan;		/* channel number used for last join */
+
+	/* AP (hostap) state -- ROUND 51 */
+	int ap_active;		/* firmware AP is started (beaconing) */
+	int vap_destroying;	/* vap delete in progress: newstate is a
+				 * pass-through, events must not re-enter
+				 * the net80211 state machine */
+
+	/* WPA PSK (set via sysctl) */
+	char psk[65];
+	int psk_len;
+	struct sysctl_ctx_list sysctl_ctx;
+	int cfg_attached;
+
+	/* Tuning (sysctl) */
+	int debug;
+	char country[4];	/* regulatory country code (e.g. "US", "DE") */
+
+	/* Scan result cache */
+#define BRCMF_SCAN_RESULTS_MAX	64
+#define BRCMF_SCAN_IE_MAX	512
+	struct brcmf_scan_result {
+		uint8_t bssid[6];
+		uint8_t ssid[32];
+		uint8_t ssid_len;
+		uint8_t chan;
+		uint16_t chanspec;
+		int16_t rssi;
+		int8_t noise;
+		uint16_t capinfo;
+		uint16_t bintval;
+		uint16_t ie_len;
+		uint8_t ie_quality;
+		uint8_t ie[BRCMF_SCAN_IE_MAX];
+	} scan_results[BRCMF_SCAN_RESULTS_MAX];
+	int scan_nresults;
+};
+
+MALLOC_DECLARE(M_BRCMFMAC);
+
+/* pcie.c - PCIe bus layer */
+int brcmf_pcie_attach(device_t dev);
+int brcmf_pcie_detach(device_t dev);
+
+/* Bus access functions (used by other modules) */
+uint32_t brcmf_reg_read(struct brcmf_softc *sc, uint32_t off);
+void brcmf_reg_write(struct brcmf_softc *sc, uint32_t off, uint32_t val);
+uint32_t brcmf_tcm_read32(struct brcmf_softc *sc, uint32_t off);
+uint16_t brcmf_tcm_read16(struct brcmf_softc *sc, uint32_t off);
+uint8_t brcmf_tcm_read8(struct brcmf_softc *sc, uint32_t off);
+void brcmf_tcm_write32(struct brcmf_softc *sc, uint32_t off, uint32_t val);
+void brcmf_tcm_write16(struct brcmf_softc *sc, uint32_t off, uint16_t val);
+uint32_t brcmf_bp_read32(struct brcmf_softc *sc, uint32_t addr);
+void brcmf_bp_write32(struct brcmf_softc *sc, uint32_t addr, uint32_t val);
+void brcmf_pcie_select_core(struct brcmf_softc *sc, struct brcmf_coreinfo *core);
+void brcmf_pcie_console_read(struct brcmf_softc *sc);
+
+/* DMA helpers */
+int brcmf_alloc_dma_buf(device_t dev, size_t size, bus_dma_tag_t *tag,
+    bus_dmamap_t *map, void **buf, bus_addr_t *paddr);
+void brcmf_free_dma_buf(bus_dma_tag_t tag, bus_dmamap_t map, void *buf);
+
+/* core.c - Chip core management and firmware download */
+int brcmf_chip_enumerate_cores(struct brcmf_softc *sc);
+void brcmf_chip_reset(struct brcmf_softc *sc);
+int brcmf_chip_enter_download(struct brcmf_softc *sc);
+void brcmf_chip_exit_download(struct brcmf_softc *sc, uint32_t resetintr);
+
+/* msgbuf.c - Message buffer protocol */
+void brcmf_msgbuf_ring_doorbell(struct brcmf_softc *sc);
+void *brcmf_msgbuf_ring_reserve(struct brcmf_softc *sc,
+    struct brcmf_pcie_ringbuf *ring);
+void brcmf_msgbuf_ring_submit(struct brcmf_softc *sc,
+    struct brcmf_pcie_ringbuf *ring);
+void brcmf_msgbuf_process_d2h(struct brcmf_softc *sc);
+int brcmf_msgbuf_init(struct brcmf_softc *sc);
+void brcmf_msgbuf_cleanup(struct brcmf_softc *sc);
+int brcmf_msgbuf_ioctl(struct brcmf_softc *sc, uint32_t cmd, int set,
+    void *buf, uint32_t len, uint32_t *resp_len);
+int brcmf_msgbuf_tx(struct brcmf_softc *sc, struct mbuf *m);
+void brcmf_msgbuf_delete_flowring(struct brcmf_softc *sc);
+int brcmf_msgbuf_init_flowring(struct brcmf_softc *sc, const uint8_t *da);
+
+
+/* pcie.c / sdio.c - NVRAM parser (shared) */
+void *brcmf_nvram_parse(const void *data, size_t size, uint32_t *lenp);
+
+/* sdio.c - SDIO bus layer */
+int brcmf_sdio_attach(struct brcmf_softc *sc);
+void brcmf_sdio_detach(struct brcmf_softc *sc);
+void brcmf_sdio_set_window(struct brcmf_softc *sc, uint32_t addr);
+uint32_t brcmf_sdio_bp_read32(struct brcmf_softc *sc, uint32_t addr);
+void brcmf_sdio_bp_write32(struct brcmf_softc *sc, uint32_t addr,
+    uint32_t val);
+uint32_t brcmf_sdio_bp_read32(struct brcmf_softc *sc, uint32_t addr);
+void brcmf_sdio_bp_write32(struct brcmf_softc *sc, uint32_t addr,
+    uint32_t val);
+
+/* sdpcm.c - SDPCM/BCDC protocol */
+extern const struct brcmf_bus_ops brcmf_sdio_bus_ops;
+int brcmf_sdpcm_ioctl(struct brcmf_softc *sc, uint32_t cmd, int set,
+    void *buf, uint32_t len, uint32_t *resp_len);
+int brcmf_sdpcm_tx(struct brcmf_softc *sc, struct mbuf *m);
+void brcmf_sdpcm_process_event(struct brcmf_softc *sc,
+    uint8_t *data, uint16_t len);
+void brcmf_sdpcm_process_rx(struct brcmf_softc *sc,
+    uint8_t *data, uint16_t len);
+void brcmf_sdpcm_init(struct brcmf_softc *sc);
+void brcmf_sdpcm_start_poll(struct brcmf_softc *sc);
+void brcmf_sdpcm_stop_poll(struct brcmf_softc *sc);
+void brcmf_sdpcm_cleanup(struct brcmf_softc *sc);
+
+/* fwil.c - Firmware interface layer */
+int brcmf_fil_cmd_data_set(struct brcmf_softc *sc, uint32_t cmd,
+    const void *data, uint32_t len);
+int brcmf_fil_cmd_data_get(struct brcmf_softc *sc, uint32_t cmd,
+    void *data, uint32_t len);
+int brcmf_fil_iovar_data_get(struct brcmf_softc *sc, const char *name,
+    void *data, uint32_t len);
+int brcmf_fil_iovar_data_set(struct brcmf_softc *sc, const char *name,
+    const void *data, uint32_t len);
+int brcmf_fil_bsscfg_data_set(struct brcmf_softc *sc, const char *name,
+    int bsscfg_idx, const void *data, uint32_t len);
+int brcmf_fil_iovar_int_set(struct brcmf_softc *sc, const char *name,
+    uint32_t val);
+int brcmf_fil_iovar_int_get(struct brcmf_softc *sc, const char *name,
+    uint32_t *val);
+int brcmf_fil_iovar_get_buf(struct brcmf_softc *sc, const char *name,
+    char *buf, uint32_t buflen);
+int brcmf_fil_bss_up(struct brcmf_softc *sc);
+int brcmf_fil_bss_down(struct brcmf_softc *sc);
+
+/* cfg.c - net80211 interface */
+int brcmf_cfg_attach(struct brcmf_softc *sc);
+void brcmf_cfg_detach(struct brcmf_softc *sc);
+void brcmf_escan_result(struct brcmf_softc *sc, void *data, uint32_t datalen);
+void brcmf_link_event(struct brcmf_softc *sc, uint32_t event_code,
+    uint32_t status, uint32_t reason, uint16_t flags);
+/* round 48 (AP): firmware station-indication events -> net80211 nodes */
+void brcmf_ap_sta_event(struct brcmf_softc *sc, uint32_t event_code,
+    const uint8_t addr[6]);
+
+/* core.c - chip parsing and EROM scan helpers */
+struct brcmf_chipinfo brcmf_parse_chipid(uint32_t regdata);
+bool brcmf_chip_supported(uint32_t chip);
+const char *brcmf_socitype_name(uint32_t socitype);
+
+typedef uint32_t (*brcmf_erom_read_fn)(void *ctx, uint32_t offset);
+struct brcmf_coreinfo brcmf_find_core(uint32_t erom_base,
+    brcmf_erom_read_fn read_fn, void *ctx, uint32_t target_coreid);
+
+/* Ring descriptor offsets (shared by pcie.c and msgbuf.c) */
+#define BRCMF_RING_MEM_BASE_ADDR_OFFSET	8
+#define BRCMF_RING_MAX_ITEM_OFFSET	4
+#define BRCMF_RING_LEN_ITEMS_OFFSET	6
+#define BRCMF_RING_MEM_SZ		16
+
+#endif /* _BRCMFMAC_H_ */

@@ -24,6 +24,7 @@
 #include <dev/ofw/ofw_bus_subr.h>
 
 #include <dev/clk/clk.h>
+#include <dev/hwreset/hwreset.h>
 
 #define	TSEN_PCTRL		0x00
 #define	 TSEN_PCTRL_ENABLE	(1u << 0)
@@ -65,8 +66,17 @@ sptsen_temp_sysctl(SYSCTL_HANDLER_ARGS)
 
 	/* Sensor 0 (primary) is in the low half-word of DATA0. */
 	val = RD4(sc, TSEN_DATA0) & TSEN_DATA_LOW_MASK;
-	/* Convert to 0.1 Kelvin for the IK sysctl format. */
-	temp = (val - TSEN_TEMP_OFFSET) * 10 + 2732;
+	/*
+	 * A raw value of 0 means the ADC has not produced a sample (e.g. the
+	 * sensor is held in reset or clock-gated).  Report absolute zero's
+	 * sentinel (0 dK) rather than a nonsensical sub-freezing temperature
+	 * so a monitoring tool can tell "no data" from a real reading.
+	 */
+	if (val == 0)
+		temp = 0;
+	else
+		/* Convert to 0.1 Kelvin for the IK sysctl format. */
+		temp = (val - TSEN_TEMP_OFFSET) * 10 + 2732;
 	return (sysctl_handle_int(oidp, &temp, 0, req));
 }
 
@@ -87,6 +97,7 @@ sptsen_attach(device_t dev)
 {
 	struct sptsen_softc *sc;
 	clk_t clk;
+	hwreset_t rst;
 	uint32_t val;
 	int i, rid;
 
@@ -101,9 +112,25 @@ sptsen_attach(device_t dev)
 		return (ENXIO);
 	}
 
-	/* Enable the sensor's clocks (best effort). */
-	for (i = 0; clk_get_by_ofw_index(dev, 0, i, &clk) == 0; i++)
-		(void)clk_enable(clk);
+	/*
+	 * Deassert the sensor's reset BEFORE touching its registers.  Without
+	 * this the ADC never runs and TSEN_DATA0 reads 0 (the driver then
+	 * reports a nonsensical constant temperature).  Mainline Linux does
+	 * this first in probe (reset_control_get_exclusive_deasserted), so we
+	 * do too.
+	 */
+	if (hwreset_get_by_ofw_idx(dev, 0, 0, &rst) == 0) {
+		if (hwreset_deassert(rst) != 0)
+			device_printf(dev, "warning: cannot deassert reset\n");
+	} else if (bootverbose)
+		device_printf(dev, "no reset control\n");
+
+	/* Enable the sensor's clocks (core + bus; best effort). */
+	for (i = 0; clk_get_by_ofw_index(dev, 0, i, &clk) == 0; i++) {
+		if (clk_enable(clk) != 0)
+			device_printf(dev, "warning: cannot enable clock %d\n",
+			    i);
+	}
 
 	/* Disable interrupts (polled reads only). */
 	WR4(sc, TSEN_INT_EN, 0xffffffff);
@@ -123,6 +150,12 @@ sptsen_attach(device_t dev)
 
 	/* Enable sensor 0 (primary). */
 	WR4(sc, TSEN_EN, RD4(sc, TSEN_EN) | 0x1);
+
+	/*
+	 * Give the hardware auto-mode conversion time to produce a first
+	 * sample before anyone reads DATA0 (a few ADC periods).
+	 */
+	DELAY(2000);
 
 	SYSCTL_ADD_PROC(device_get_sysctl_ctx(dev),
 	    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
